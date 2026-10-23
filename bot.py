@@ -1,4 +1,20 @@
 
+
+Repository navigation
+Code
+Issues
+Pull requests
+gold-signal-bot
+/bot.py
+mehdinadery84-hash
+mehdinadery84-hash
+15 minutes ago
+14 lines (11 loc) · 455 Bytes
+
+Code
+
+Blame
+
 def gold_signal(price, previous_price):
     if price > previous_price:
         return "📈 روند صعودی؛ فقط بررسی کن"
