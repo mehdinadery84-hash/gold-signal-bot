@@ -1,0 +1,15 @@
+name: Gold Signal Test Bot
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "*/15 * * * *"
+
+jobs:
+  signal:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run test
+        run: |
+          echo "ربات آزمایشی سیگنال طلای آب‌شده فعال شد"
+          date -u
