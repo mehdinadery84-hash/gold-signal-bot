@@ -1,22 +1,208 @@
 
-name: Gold Signal Test Bot
+import os
+import json
+import time
+import urllib.request
+import urllib.parse
 
-on:
-  workflow_dispatch:
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 
-jobs:
-  signal:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Get code
-        uses: actions/checkout@v4
+if not TOKEN:
+    raise RuntimeError("TELEGRAM_BOT_TOKEN تنظیم نشده است")
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+TG = f"https://api.telegram.org/bot{TOKEN}/"
+IRAN_URL = (
+    "https://raw.githubusercontent.com/iran-market/"
+    "iran-market.github.io/main/data/popular.json"
+)
+XAU_URL = "https://api.gold-api.com/price/XAU"
 
-      - name: Run bot
-        env:
-          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-        run: python bot.py
+POLL_SECONDS = 900
+chat_ids = set()
+offset = 0
+
+history = {"global": [], "iran": []}
+last_signal = {"global": None, "iran": None}
+
+
+def get_json(url, timeout=25):
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "GoldSignalTestBot/1.0"}
+    )
+    with urllib.request.urlopen(req, timeout=timeout) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def tg(method, data=None):
+    body = None
+    if data is not None:
+        body = urllib.parse.urlencode(data).encode("utf-8")
+    req = urllib.request.Request(TG + method, data=body)
+    with urllib.request.urlopen(req, timeout=35) as response:
+        result = json.loads(response.read().decode("utf-8"))
+    if not result.get("ok"):
+        raise RuntimeError("Telegram API error")
+    return result["result"]
+
+
+def send(chat_id, message):
+    tg("sendMessage", {
+        "chat_id": str(chat_id),
+        "text": message
+    })
+
+
+def iran_prices():
+    payload = get_json(IRAN_URL)
+    items = payload.get("data", [])
+
+    gold = next(
+        (x for x in items if x.get("symbol") == "GOLD_18K_IRR"),
+        None
+    )
+    usd = next(
+        (x for x in items if x.get("symbol") == "USD_IRR_FREE"),
+        None
+    )
+
+    if not gold or not gold.get("price"):
+        raise ValueError("قیمت طلای ۱۸ عیار ایران در دسترس نیست")
+
+    gram18 = float(gold["price"])
+    usd_toman = float(usd["price"]) if usd and usd.get("price") else None
+
+    # ارزش محاسباتی یک مثقال ۱۸ عیار؛ نه مظنه قطعی بازار آب‌شده
+    mesghal = gram18 * 4.6083
+    return mesghal, gram18, usd_toman
+
+
+def global_price():
+    data = get_json(XAU_URL)
+    return float(data["price"])
+
+
+def ema(values, period):
+    result = values[0]
+    alpha = 2 / (period + 1)
+    for value in values[1:]:
+        result = alpha * value + (1 - alpha) * result
+    return result
+
+
+def update_signal(key, price):
+    values = history[key]
+
+    # قیمت تکراری را نمونه جدید حساب نکن
+    if not values or price != values[-1]:
+        values.append(price)
+        if len(values) > 50:
+            values.pop(0)
+
+    # تا وقتی 12 قیمت متفاوت نداریم، سیگنال صادر نکن
+    if len(values) < 12:
+        return "داده کافی نیست؛ در حال بررسی روند"
+
+    fast = ema(values[-12:], 5)
+    slow = ema(values[-12:], 12)
+
+    if fast > slow:
+        return "🟢 روند صعودی؛ سیگنال آزمایشی خرید"
+    if fast < slow:
+        return "🔴 روند نزولی؛ سیگنال آزمایشی فروش"
+    return "🟡 صبر؛ جهت مشخص نیست"
+
+
+def get_report():
+    xau = global_price()
+    mesghal, gram18, usd = iran_prices()
+
+    global_signal = update_signal("global", xau)
+    iran_signal = update_signal("iran", mesghal)
+
+    usd_text = (
+        f"{usd:,.0f} تومان"
+        if usd is not None else "در دسترس نیست"
+    )
+
+    return (
+        "📊 گزارش آزمایشی ربات طلا\n\n"
+        "🌍 طلای جهانی XAU/USD\n"
+        f"قیمت هر اونس: ${xau:,.2f}\n"
+        f"{global_signal}\n\n"
+        "🇮🇷 طلای ایران\n"
+        f"ارزش محاسباتی هر مثقال ۱۸ عیار: "
+        f"{mesghal:,.0f} تومان\n"
+        f"قیمت هر گرم ۱۸ عیار: {gram18:,.0f} تومان\n"
+        f"دلار آزادِ منبع داده: {usd_text}\n"
+        f"{iran_signal}\n\n"
+        "⚠️ این سیگنال بر اساس EMA آزمایشی است؛ "
+        "توصیه قطعی خرید و فروش نیست.\n"
+        "قیمت مثقال، محاسباتی است و ممکن است با "
+        "قیمت واقعی معامله آب‌شده فرق داشته باشد."
+    )
+
+
+def handle_updates():
+    global offset
+
+    updates = tg("getUpdates", {
+        "offset": offset,
+        "timeout": 20
+    })
+
+    for item in updates:
+        offset = item["update_id"] + 1
+        msg = item.get("message", {})
+        chat = msg.get("chat", {})
+        chat_id = chat.get("id")
+        text = msg.get("text", "").strip().lower()
+
+        if not chat_id:
+            continue
+
+        chat_ids.add(chat_id)
+
+        if text in ("/start", "/start@mahdiaiarbot"):
+            send(chat_id,
+                 "سلام! ربات آزمایشی طلا فعال است.\n"
+                 "برای دریافت گزارش، /price را بفرست.")
+        elif text.startswith("/price"):
+            try:
+                send(chat_id, get_report())
+            except Exception as exc:
+                print("Price error:", repr(exc))
+                send(chat_id, "دریافت قیمت ناموفق بود؛ کمی بعد دوباره امتحان کن.")
+        elif text.startswith("/help"):
+            send(chat_id, "دستورها:\n/start شروع\n/price گزارش قیمت و روند")
+
+
+def main():
+    print("Gold signal test bot started")
+    next_report = 0
+
+    while True:
+        try:
+            handle_updates()
+
+            if time.time() >= next_report:
+                if chat_ids:
+                    try:
+                        report = get_report()
+                        for chat_id in list(chat_ids):
+                            try:
+                                send(chat_id, report)
+                            except Exception as exc:
+                                print("Send error:", repr(exc))
+                    except Exception as exc:
+                        print("Report error:", repr(exc))
+
+                next_report = time.time() + POLL_SECONDS
+
+        except Exception as exc:
+            print("Loop error:", repr(exc))
+
+        time.sleep(2)
+
+
+if __name__ == "__main__":
+    main()
