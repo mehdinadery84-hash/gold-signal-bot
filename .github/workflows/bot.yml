@@ -1,15 +1,22 @@
+
 name: Gold Signal Test Bot
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/15 * * * *"
 
 jobs:
   signal:
     runs-on: ubuntu-latest
     steps:
-      - name: Run test
-        run: |
-          echo "ربات آزمایشی سیگنال طلای آب‌شده فعال شد"
-          date -u
+      - name: Get code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run bot
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: python bot.py
